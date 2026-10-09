@@ -1,0 +1,164 @@
+# Fiber Pullout Analyzer (MATLAB App)
+
+Replaces the manual CSV -> Excel -> graphing tool -> Prism workflow with one window.
+
+## Files
+- `FiberPulloutAnalyzer.m` - the app itself. Run it, don't edit unless changing the UI.
+- `analyzeAllTestsByFilename.m` - recursively scans the data folder (any depth, any mix of file types) for pull-out tests and pulls peak force/displacement for every one, using the filename to identify TestID, Group, and Treatment.
+- `parseTestFilename.m` - parses `T1-10mM-noPT-tensile_test_20260625_180234.csv` style filenames into TestID / concentration (Group) / PT-or-noPT (Treatment).
+- `loadPulloutData.m` - reads one test file (CSV, TSV, or Excel), finds the Displacement and Load columns by header name (falls back to fixed columns 3/4 if headers are missing).
+- `getPeakForce.m` - finds the peak load and the displacement at that point, with the tie-break rule.
+- `runStatsPipeline.m` - descriptive stats -> normality check -> ANOVA (one-way/two-way, Type III SS) or Kruskal-Wallis -> Tukey-Kramer/Dunn-Sidak post-hoc -> effect sizes.
+- `daPearsonTest.m` - D'Agostino-Pearson omnibus K2 normality test (see below).
+- `curveComboLabel.m` / `assignCurveColors.m` - shared labeling/coloring so a given Group+Treatment combo is always the same solid color everywhere (embedded plots, pop-out windows, exported graphs).
+- `drawCurvesPlot.m` / `drawMeanCurvesPlot.m` / `drawSummaryBarChart.m` - the actual chart-drawing logic, each usable on any axes (embedded UI panel, a full-size pop-out figure, or an offscreen figure being exported to PNG) so there's exactly one version of each chart's code, not three copies that can drift apart.
+- `updateAndLoadCumulativeLog.m` - optional: appends this run's results to a persistent CSV and returns the full history, for the "All Data Points Thus Far" chart.
+
+## Descriptive statistics table: Peak Force AND Displacement together
+`descriptive_statistics.csv` (and the Stats Summary panel) now report Peak Force and Displacement-at-Peak side by side in one table per group - `Group, N, MeanPeakForce_N, SDPeakForce_N, SEMPeakForce_N, CI95PeakForce_N, MeanDispAtPeak_mm, SDDispAtPeak_mm, SEMDispAtPeak_mm, CI95DispAtPeak_mm`. This is deliberate: previously the tool only computed Peak Force descriptives, so building a combined "Group / n / Mean Peak Force / SD Peak Force / Mean Disp at Peak / SD Disp at Peak" table for a slide meant manually pulling the Displacement numbers from somewhere else and pasting them in next to the Peak Force ones - exactly the kind of manual combination step where a transcription error can happen (and did - a table like this is what flagged the issue). Both are now computed in the same pass, straight from the same underlying resultsTable, so there's no separate manual step left to get wrong.
+
+## Fixed bug: "Not enough groups" when Group is constant but Treatment varies
+If a dataset holds Group constant and only varies Treatment (e.g. one fiber type, "PLLA", tested with two treatments, "NPC" vs "PC"), the pipeline was checking group count on `Group` alone, counting 1 unique value, and bailing out with "Not enough groups for a comparison" - even though there were clearly two real conditions to compare (visible correctly in the Descriptives and Normality tables, which are already combo-aware). The one-way/two-way ANOVA logic just never looked at Treatment as a potential comparison variable in its own right.
+
+Fixed: when Group has fewer than 2 levels but Treatment varies, Treatment is now automatically used as the comparison variable instead - same one-way ANOVA/Kruskal-Wallis machinery, just pointed at the column that actually varies. The Stats Summary reports this via a `*** NOTE ***` explaining the swap (e.g. "Group is constant (PLLA)... Treatment (NPC vs PC) was used instead"), and `pLabels` correctly says "Treatment" rather than "Group" in the output. Normal concentration-sweep datasets (where Group does vary) are unaffected - verified the swap only triggers in the specific constant-Group case, not generally.
+
+## Fixed layout bug: overlapping controls in the Setup panel
+The "Min n for normality test" field was hand-placed without re-checking the whole panel, and ended up overlapping both the Treatment field above it and the Run Analysis/Export Results buttons below it (visible as squashed/overlapping controls in the running app). The `PathLabel` text was also clipped - it wraps to 3 lines but only had room allocated for 2.
+
+Fixed by computing every position in the Setup panel programmatically (exact row heights + gaps, accumulated top-down) instead of hand-picking pixel coordinates, and verified with a small overlap-checking script: 0 overlapping pairs, 0 out-of-bounds components, across all 30 positioned controls. If you ask for another field added to this panel in the future, that's the standard to hold it to - re-verify the whole panel, not just eyeball a gap near the new field.
+
+## Normality test switched to Shapiro-Wilk (valid from n=3, configurable minimum)
+D'Agostino-Pearson has a hard mathematical floor at n=8 - its formula divides by n-3, which is exactly zero at n=3 and negative below that, so no amount of configuration could make it test smaller samples; that's a property of the test itself, not a setting. Switched the primary normality test to **Shapiro-Wilk** (`shapiroWilkTest.m`, Royston 1995 AS R94 approximation), which is mathematically valid from n=3 up and is actually Prism's own *recommended* default (not just an alternative). Implemented from the published algorithm and validated against `scipy.stats.shapiro` across n=3 through 50, both normal and heavily-skewed samples - matched to 5+ decimal places in every case.
+
+A new **"Min n for normality test"** field (default 3, the UI won't let you go lower) lets you set the threshold below which a cell is reported "Not tested" rather than actually tested - useful if you'd rather not test very thin cells even though Shapiro-Wilk technically could. `daPearsonTest.m` stays in the codebase as a validated alternative (in case you ever want to match Prism's *other* option exactly) but isn't called by default anymore.
+
+## Fixed bug: Descriptives table silently pooling Treatment levels together
+The Descriptives table (and its CSV export) was grouping by **Group only**, while every chart in the app groups by **Group+Treatment combo**. If a Group had more than one Treatment level (e.g. a crosslinked "Trauer" and an uncrosslinked "Trauer, woEDC-NHS" control), the table pooled all of them into one "Trauer" row - correct total N, but hiding the actual condition-level difference the bar chart was showing as separate bars. This is what "the descriptive statistics is not taking all the groups" turned out to be: not missing data, but the wrong grouping granularity for a dataset with Treatment-level distinctions. Fixed to group by the same Group+Treatment combo everywhere else in the app does; each combo now gets its own row (e.g. "Trauer" and "Trauer, woEDC-NHS" are separate rows, matching the bar chart's x-axis labels exactly). Group alone is still correctly used for the actual ANOVA Group-factor logic elsewhere - that's a different, legitimate use of Group as one of two independent factors, not a table-display grouping.
+
+## Larger font sizes
+All charts (embedded, pop-out, and exported) now use larger, more readable font sizes by default - 14pt tick labels, 18pt bold titles, 15pt axis labels, 12pt legend text (`applyPlotFontSizes.m`). No settings to configure; this is just a straight readability upgrade for dropping graphs into slides without needing to resize/zoom first.
+
+## Separate Y-axis limits for each bar chart
+Two new fields, **Force:** and **Disp:**, let you fix the Peak Force bar chart's and the Displacement bar chart's y-axes independently (e.g. `Force: 0,0.5`) - these apply to the embedded chart, Pop Out windows, every export, and the cumulative "All Data Points Thus Far" charts alike, so setting it once keeps every version of that chart on the same scale, not just one. These are separate from the curve-plot **X:**/**Y:** fields (Peak Force is in N, Displacement is in mm - the same reasoning as before: one shared number can't sensibly clip two different units, so each bar chart gets its own field).
+
+## Manual axis limits (cutting a long tail off a graph)
+Two fields, **X:** and **Y:**, accept `min,max` (e.g. `0,6`) and override auto-scaling on the curve plots - the all-curves overlay, the mean-curves plot, the pop-out windows, and the exported PNGs all respect them. Leave either blank for auto-scale on that axis. Malformed input (not exactly two numbers, or min >= max) is treated as blank and logged as a note rather than crashing or silently doing something odd.
+
+These only apply to the **curve plots** (Displacement on X, Load on Y - consistent units everywhere they're used), not the Summary Data bar charts, since those two bar charts have different Y units from each other (Peak Force in N vs. Displacement in mm) - one shared limit can't sensibly clip both. If you need to crop a bar chart's y-axis too, that's not wired in yet; ask if you want it added as its own separate field.
+
+Cutting the range doesn't discard or recompute anything underneath - the mean curve and SD band, for instance, are still calculated from the full data; the axis limits just change what's visibly shown.
+
+## Group ordering: by concentration, not alphabetical
+`sortByConcentration.m` orders every group/combo list by ascending numeric concentration (5mM before 10mM before 15mM...) rather than MATLAB's default alphabetical string sort, which gave the wrong order (e.g. "10mM, 15mM, 1mM, 20mM, 25mM, 40mM, 5mM"). It parses the leading number+mM from each label - so combo labels like "20mM, SuperGlue" still sort correctly by their 20mM - and pushes anything unparseable (e.g. "Unknown") to the end automatically. Applied everywhere a group list gets displayed: bar chart x-axis, curve plot legends, and the Descriptives/Normality tables in the Stats Summary.
+
+## Readability: light background and consistent auto-scaling
+Two new small files fix a display issue you'll likely never notice unless your MATLAB desktop theme is set to dark: `forceLightFigure.m` explicitly forces every pop-out and exported figure to a white background with black text/axes, regardless of MATLAB's dark-mode setting - previously, dark mode flipped these to a black background, which made the near-black data-point markers and error bars invisible. `tightenAxes.m` explicitly tight-fits + adds a small fixed 5% margin to every axis, rather than relying on MATLAB's default auto-padding (which could leave a lot of unexplained empty space, especially with one outlier point stretching the range). Both are called automatically inside `drawCurvesPlot.m`, `drawMeanCurvesPlot.m`, and `drawSummaryBarChart.m`, so this applies everywhere - embedded UI panels, pop-out windows, and exported PNGs alike.
+
+## Graphs: pop-out windows and full-size export
+Two buttons address the small/cramped embedded plots:
+
+- **Pop Out Plots** - opens 4 full-size native MATLAB figure windows (all individual curves, mean curves by group, Summary Data peak force, Summary Data displacement), each with the normal MATLAB toolbar - zoom, pan, data cursor, and File > Save As / Export to save it yourself at whatever size/format you want.
+- **Export Full-Size Graphs** - pick a folder, and it saves every chart as a high-resolution (10x7in @ 200 DPI) PNG, redrawn fresh at full size rather than a screenshot of the small embedded panel:
+  - `01_SummaryData_PeakForce.png`, `02_SummaryData_Displacement.png` - bar + SD + individual points, matching the "Summary Data" style
+  - `03_OverallResults_AllCurves.png` - every individual force-displacement curve, solid lines, one distinct color per Group/Treatment combo (no dashed/dotted lines - color alone carries the grouping)
+  - `04_OverallResults_MeanCurves.png` - mean curve per combo with a shaded +/- SD band, matching "Mean Pull-Out Curves by Group"
+  - `05_##_<combo>.png` - one file per Group/Treatment combo (numbered in concentration order), individual curves only for that combo, matching the "10 mM - No PT" style per-condition slide. Each sample within the combo gets its own distinct color here (not the shared combo color used in the overview charts) - within a single-combo view, telling individual samples apart is the whole point, so a T2/T8/T20-style legend needs T2/T8/T20 to actually look different from each other.
+  - `06_AllDataThusFar_PeakForce.png`, `07_AllDataThusFar_Displacement.png` - only if a cumulative log path is set (see below)
+
+These are meant to be dropped straight into your own slides/report - nothing here builds a PowerPoint file automatically.
+
+### Cumulative log ("All Data Points Thus Far")
+If you want a running "every test we've ever run" chart like Klona's existing slide of that name, set a **Cumulative log CSV** path before exporting graphs (Browse creates one if it doesn't exist yet). Every export appends this run's results to that file (skipping exact duplicates, so re-exporting the same run twice doesn't double-count it) and includes two extra PNGs built from the full accumulated history. Point every future run at the *same* log file to keep building up the "thus far" picture; leave the field blank to skip this entirely.
+
+## File formats accepted
+**CSV, TSV, XLSX, and XLS** - any mix in the same folder. Each file is read according to its own extension; you don't need to convert anything first.
+
+## What "Browse" selects
+Click **Browse** and pick the **top-level folder** that contains your data (e.g. your local/synced copy of `BioDrive/fiber pullout tests`). You do **not** select an individual test or file - the app recursively searches every subfolder underneath whatever you pick, so it doesn't matter whether your files are flat or nested.
+
+## How to run
+1. Put all 5 `.m` files in the same folder, and add that folder to your MATLAB path (or just `cd` into it).
+2. In the MATLAB command window, type:
+   ```
+   app = FiberPulloutAnalyzer;
+   ```
+3. Click **Browse**, point it at your local copy of (or synced) `BioDrive/fiber pullout tests` folder.
+4. Set:
+   - **Tie-break rule**: which displacement to use if the peak load is a plateau across a few rows. `Last` matches what you've been doing by default.
+   - **ANOVA mode**: leave on `Auto-detect` unless you want to force one-way or two-way.
+   - **Treatment column**: only fill this in if you're doing a two-way comparison (e.g. a pre-treatment factor). It must match a column name in your data - see "Adding a treatment factor" below.
+5. Click **Run Analysis**. The table, curve overlay, and stats plot all populate at once.
+6. Click **Export Results** to save the peak-force CSV, both plots as PNGs, and a stats summary text file - all in one folder you choose.
+
+## Two supported experiment designs
+The parser auto-detects which of these a given filename encodes - you can even mix both kinds of experiment in the same folder:
+
+1. **Concentration sweep** (Group = crosslinker concentration, e.g. varying EDC-NHS mM): `T1-10mM-noPT-tensile_test_...`
+2. **Fiber-type comparison at a fixed concentration** (Group = fiber type): `T1_PDO_tensile_test_...`, `T5_PCL_tensile_test_...`, `T6_PGABraid_tensile_test_...`. Used automatically whenever no `<number>mM` pattern is found in the filename - the leading fiber-type-like token (PDO, PGAMulti, PLLAYarn, PLLATwist, PCL, PGABraid, or anything similarly shaped) becomes Group instead. A trailing replicate label like `_trial2` still gets picked up separately as Treatment, same as before.
+
+Since the concentration is fixed across an entire fiber-type-comparison run, it isn't (and doesn't need to be) in the filename at all - there's nothing to parse there because it doesn't vary between tests. Note it in your own experiment log instead (e.g. "Lifeink 20, 10mM EDC-NHS for all groups") since the app has no way to know it from the data alone.
+
+**For a fiber-type comparison, use One-way ANOVA (Group = fiber type), not Auto-detect/Two-way.** Any `_trial2`/`_trial1` style suffixes are just replicate labels, not a real second experimental factor - the same caution as the earlier Genipin/SuperGlue dataset applies here.
+
+Also handles: no `T` prefix on the test number (`25_PLLATwist_...` still becomes `T25`), and a timestamp that's date-only with no time (`..._tensile_test_20260724.csv`).
+
+## Expected folder / filename structure
+The app recursively scans whatever folder you point it at, so nesting doesn't matter. What matters is the **filename**, which encodes the metadata:
+
+```
+T1-10mM-noPT-tensile_test_20260625_180234.csv
+ |   |     |         |         |
+ |   |     |         date      time
+ |   |     Treatment/modifier (optional)
+ |   Concentration (Group)
+ TestID (optional)
+```
+
+The parser is deliberately tolerant of real-world messiness, since actual filenames turned out far less consistent than the clean sample - dashes vs. underscores, a modifier glued directly onto the concentration with no separator (`1mMGenipin`), a modifier separated by underscore (`20mM_SuperGlue`, `5mM_trial1`), or missing entirely. It handles all of these:
+
+- **TestID** missing -> falls back to `Unlabeled_<time>` (still unique, still included)
+- **Concentration** missing -> `Group = Unknown` (still included)
+- **Modifier** - normalized to `PT`/`noPT` if that's what it says; otherwise kept as-is (`Genipin`, `SuperGlue`, `trial1`, etc.); `none` if absent
+
+Nothing gets silently dropped for missing metadata - the Status/Log box shows a `NOTE` line for every file where something had to be inferred, so you can spot and rename files with incomplete names. A file only gets `SKIPPED` (excluded entirely) if it's missing the `tensile_test_DATE_TIME` suffix altogether, or its data columns can't be read.
+
+Confirmed columns in the raw data files: `Time (ms), Steps, Displacement (mm), Load (N)`. The app matches "Displacement" and "Load"/"Force" by header name, so column order doesn't matter; it only falls back to fixed columns 3/4 if it can't find matching headers.
+
+If the convention shifts again, `parseTestFilename.m` is the one file to update - the parsing logic is isolated there on purpose.
+
+**A scientific note on the `Treatment`/modifier field**: it's just whatever text follows the concentration in the filename, so if a batch mixes genuinely different kinds of things under it (e.g. a crosslinker name in one file, an alternate adhesive in another, a replicate label in a third), those aren't comparable levels of one factor - running a two-way ANOVA across them would not be meaningful. Check what's actually in the `Treatment` column of your results before trusting "Auto-detect" to pick two-way ANOVA; if it's a grab-bag rather than a clean two-level design (e.g. PT vs noPT), select **One-way** manually instead, or split the data into a cleaner subset first.
+
+**Automatic fallback for uncrossed designs**: if you do request/auto-select two-way ANOVA on data where Group and Treatment aren't actually crossed (e.g. each concentration only ever appears with one particular modifier, so the interaction term can't be mathematically estimated), the app detects this - either up front, or by catching NaN p-values straight from `anovan` - and automatically falls back to a one-way ANOVA on Group, with a clear `*** NOTE ***` at the top of the Stats Summary explaining why. It will never silently show NaN p-values as if they were a real result.
+
+## Treatment factor (two-way ANOVA) - already wired in
+`Group` (concentration) and `Treatment` (PT/noPT) are both parsed automatically from the filename now, so **Auto-detect** in the ANOVA dropdown will run a two-way ANOVA (Group x Treatment x Interaction) as soon as more than one Treatment value shows up in your dataset. If everything in a run happens to be noPT only, it correctly falls back to one-way instead of a degenerate two-way test.
+
+## Statistical methods used (for citing in methods sections)
+All of this is computed with plain, named MATLAB/Statistics-Toolbox functions - nothing hand-rolled - so it's directly citable and reproducible:
+
+| Step | Method | Notes |
+|---|---|---|
+| Descriptive stats | mean, SD, SEM, 95% CI (t-distribution) | Reported for every group regardless of branch |
+| Normality | **D'Agostino-Pearson omnibus K2 test** (`daPearsonTest.m`), alpha = 0.05 | Same test GraphPad Prism runs by default ("D'Agostino & Pearson"). Not built into MATLAB's Statistics Toolbox, so implemented from the published formula (D'Agostino, Belanger & D'Agostino Jr., 1990) and validated against `scipy.stats.normaltest` (exact match to 6 decimal places across normal/skewed/heavy-tailed samples at n=20/50/100, and at the n=8 boundary). Requires n>=8 per cell - a stricter minimum than most small pilot datasets will have; those cells are reported "Not tested (n<8)", never silently assumed normal. |
+| Parametric, 1 factor | One-way ANOVA (`anova1`) | |
+| Parametric, 2 factors | Two-way ANOVA (`anovan`), **Type III sum of squares** explicitly set (`'sstype',3`) | Matches GraphPad Prism's default; SS type matters for unbalanced designs so it's pinned rather than left to MATLAB's default. Automatically falls back to one-way with an on-screen explanation if Group and Treatment aren't actually crossed (see below). |
+| Non-parametric | Kruskal-Wallis (`kruskalwallis`) | Used if *any* cell fails normality (conservative, matches typical Prism workflow) |
+| Post-hoc | Tukey-Kramer HSD (ANOVA branches) or Dunn-Sidak (Kruskal-Wallis branch), via `multcompare` | All pairwise comparisons, not just vs. control; for two-way, run separately per factor; sorted most-to-least significant in the Stats Summary |
+| Effect size | eta-squared (one-way), partial eta-squared per term (two-way), epsilon-squared (Kruskal-Wallis) | Computed directly from the ANOVA sum-of-squares table |
+
+## Choosing Auto / One-way / Two-way
+The **ANOVA mode** dropdown in the app is exactly this choice - it's already there, nothing new to add:
+- **Auto-detect**: two-way if a Treatment column with >1 distinct value is present, otherwise one-way (with automatic fallback to one-way if the design turns out not to be properly crossed - see below)
+- **One-way**: always compares Group only, ignoring Treatment entirely
+- **Two-way**: always attempts Group x Treatment x Interaction (same automatic fallback applies if the design can't support it)
+
+Normality is always computed first regardless of which mode you pick, and its result (Normal / Non-normal branch) determines ANOVA vs. Kruskal-Wallis within whichever mode you chose.
+
+Group labels for post-hoc comparisons are pulled directly from `stats.gnames`/`stats.grpnames` (the same structure `multcompare` indexes against), not re-derived independently, so a comparison can never get mislabeled.
+
+## Notes / limitations
+- If a cell fails normality, **all** groups go to Kruskal-Wallis (conservative, matches typical Prism usage).
+- `boxchart` requires MATLAB R2020b or later; the app falls back to a mean +/- SEM bar plot automatically on older versions (significance brackets and jittered points are boxchart-only, for now).
+- Significance brackets on the plot are only drawn for the simple one-way case with <=10 pairwise comparisons; for two-way designs, check the full pairwise-per-factor breakdown in the Stats Summary text box and exported `posthoc_comparisons.csv` instead - cramming two independent factors' comparisons onto one axis gets misleading, not clearer.
+- Bad/unreadable files are skipped and logged in the Status box rather than crashing the run.
+- Verify results against a small manually-checked test case before trusting this on your real dataset - I've validated the peak-extraction and filename-parsing logic against your actual sample files, but haven't been able to run the full MATLAB app itself (no MATLAB license in this environment).
